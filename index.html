@@ -1213,19 +1213,28 @@
         }
 
         function estimateTravelTime(distKm, transport) {
+            // ✨ 修正：超近距離直接顯示就在附近
+            if (distKm < 0.15) return "就在附近";
+
             let speed = 30; 
-            if (transport === '步行') speed = 4;
-            else if (transport === '自駕' || transport === '計程車') speed = 40;
-            else if (transport === '地鐵' || transport === '火車') speed = 35;
-            else if (transport === '公車') speed = 20;
+            if (transport === '步行') speed = 4.5;
+            else if (transport === '自駕' || transport === '計程車') speed = 35;
+            else if (transport === '地鐵' || transport === '火車') speed = 30;
+            else if (transport === '公車') speed = 15;
             else if (transport === '飛機') speed = 800;
 
             let baseMin = 0;
-            if (['地鐵', '火車', '公車'].includes(transport)) baseMin = 10; 
-            if (transport === '飛機') baseMin = 120; 
+            if (['地鐵', '火車'].includes(transport)) baseMin = 5;
+            if (transport === '公車') baseMin = 8;
+            if (transport === '飛機') baseMin = 90;
+            if (['自駕', '計程車'].includes(transport)) baseMin = 2;
+
+            // ✨ 修正：如果距離很近 (小於 500 公尺)，大幅減少預設的「等車時間」
+            if (distKm < 0.5 && ['地鐵', '火車', '公車'].includes(transport)) {
+                baseMin = 2; 
+            }
 
             let mins = Math.round((distKm / speed) * 60) + baseMin;
-            if (mins < 1 && distKm < 0.1) return "就在附近";
             if (mins < 1) mins = 1;
             if (mins >= 60) {
                 const h = Math.floor(mins / 60);
@@ -1339,16 +1348,6 @@
             let validPoints = []; 
             let failedLocations = []; 
             const safeColor = escapeHtml(trip.color); 
-            
-            // ✨ 地圖絕對力場：計算合法半徑與中心點
-            const biasCoords = destCoords[trip.dest] || destCoords['其他'];
-            const isValidCoords = (lat, lon) => {
-                if (!biasCoords || trip.dest === '其他') return true;
-                const d = getDistanceFromLatLonInKm(lat, lon, biasCoords.lat, biasCoords.lon);
-                // 亞洲國家半徑鎖定在 3000km 內，歐美給到 7000km
-                const maxDist = ['美國', '歐洲'].includes(trip.dest) ? 7000 : 3000;
-                return d <= maxDist;
-            };
 
             for (let i = 0; i < items.length; i++) {
                 const item = items[i];
@@ -1360,84 +1359,90 @@
                         const cleanLoc = item.location.replace(/[\(（].*?[\)）]/g, '').trim(); 
                         const firstPart = item.location.split(/[,，\s-]/)[0].trim(); 
 
-                        // ✨ 修正核心：將查詢分為「純地名」與「加國家」，純地名配合國家鎖定的命中率最高！
-                        let pureQueries = [item.location, cleanLoc, firstPart];
-                        let countryQueries = [`${item.location} ${trip.dest}`, `${cleanLoc} ${trip.dest}`, `${firstPart} ${trip.dest}`];
-                        
-                        // 過濾空字串與去重
-                        pureQueries = [...new Set(pureQueries.filter(q => q))];
-                        countryQueries = [...new Set(countryQueries.filter(q => q))];
-                        
-                        // 如果有選定國家，優先搜純地名；否則把加了國家的也混進去搜
-                        let queriesToTry = trip.dest !== '其他' ? [...pureQueries, ...countryQueries] : [...pureQueries];
+                        // ✨ 修正：三階段智慧搜尋，解決出發地(台灣機場)消失的問題
+                        let pureQueries = [...new Set([cleanLoc, item.location, firstPart].filter(q => q))];
+                        let destQueries = pureQueries.map(q => `${q} ${trip.dest}`);
 
                         const nomCountry = { '日本': 'jp', '韓國': 'kr', '泰國': 'th', '台灣': 'tw', '美國': 'us' }[trip.dest] || '';
                         const arcgisCountry = { '日本': 'JP', '韓國': 'KR', '泰國': 'TH', '台灣': 'TW', '美國': 'US' }[trip.dest] || '';
 
-                        for (let query of queriesToTry) {
+                        // 階段 1：優先鎖定目的地國家精準搜尋 (解決飛去歐洲的問題)
+                        for (let query of pureQueries) {
                             if (coords) break;
-
-                            // 策略 A: ArcGIS 企業圖資 (純地名 + sourceCountry 命中率極高)
                             try {
-                                let arcgisUrl = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(query)}&f=json&maxLocations=5`;
+                                let arcgisUrl = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(query)}&f=json&maxLocations=3`;
                                 if (arcgisCountry) arcgisUrl += `&sourceCountry=${arcgisCountry}`;
-                                
                                 let res = await fetch(arcgisUrl);
                                 let data = await res.json();
-                                if (data.candidates && data.candidates.length > 0) {
-                                    for (let c of data.candidates) {
-                                        // 分數大於20，且通過距離檢測 (避免飛去歐洲)
-                                        if (c.score > 20 && isValidCoords(c.location.y, c.location.x)) {
-                                            coords = [c.location.y, c.location.x];
-                                            break;
-                                        }
-                                    }
+                                if (data.candidates && data.candidates.length > 0 && data.candidates[0].score >= 30) {
+                                    coords = [data.candidates[0].location.y, data.candidates[0].location.x];
+                                    break;
                                 }
                             } catch(e) {}
+                            
                             if (coords) break;
-
-                            // 策略 B: Nominatim (OpenStreetMap)
                             try {
-                                await new Promise(r => setTimeout(r, 400));
-                                let nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&accept-language=zh-TW,zh,ja,en`;
+                                await new Promise(r => setTimeout(r, 200));
+                                let nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=3&accept-language=zh-TW,zh,ja,en`;
                                 if (nomCountry) nomUrl += `&countrycodes=${nomCountry}`;
-                                
                                 let res = await fetch(nomUrl);
                                 let data = await res.json();
                                 if (data && data.length > 0) {
-                                    for (let c of data) {
-                                        if (isValidCoords(parseFloat(c.lat), parseFloat(c.lon))) {
-                                            coords = [parseFloat(c.lat), parseFloat(c.lon)];
-                                            break;
-                                        }
-                                    }
+                                    coords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+                                    break;
                                 }
                             } catch(e) {}
-                            if (coords) break;
                         }
 
-                        // 策略 C: 最終 Photon 備用
+                        // 階段 2：加上國家名稱的擴展搜尋
                         if (!coords) {
-                            try {
-                                const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(cleanLoc || item.location)}&limit=5&lat=${biasCoords.lat}&lon=${biasCoords.lon}`;
-                                let res = await fetch(photonUrl);
-                                let data = await res.json();
-                                if (data.features && data.features.length > 0) {
-                                    for (let f of data.features) {
-                                        if (isValidCoords(f.geometry.coordinates[1], f.geometry.coordinates[0])) {
-                                            coords = [f.geometry.coordinates[1], f.geometry.coordinates[0]];
-                                            break;
-                                        }
+                            for (let query of destQueries) {
+                                if (coords) break;
+                                try {
+                                    let arcgisUrl = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(query)}&f=json&maxLocations=1`;
+                                    let res = await fetch(arcgisUrl);
+                                    let data = await res.json();
+                                    if (data.candidates && data.candidates.length > 0 && data.candidates[0].score >= 30) {
+                                        coords = [data.candidates[0].location.y, data.candidates[0].location.x];
+                                        break;
                                     }
-                                }
-                            } catch(e) {}
+                                } catch(e) {}
+                            }
+                        }
+
+                        // 階段 3：解除國家限制，全球無限制搜尋 (解決 Day 1 是台灣機場，但目的地是日本而找不到的問題)
+                        if (!coords) {
+                            for (let query of pureQueries) {
+                                if (coords) break;
+                                try {
+                                    let arcgisUrl = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(query)}&f=json&maxLocations=1`;
+                                    let res = await fetch(arcgisUrl);
+                                    let data = await res.json();
+                                    // 要求極高的分數才允許全球配對，避免誤判
+                                    if (data.candidates && data.candidates.length > 0 && data.candidates[0].score >= 60) {
+                                        coords = [data.candidates[0].location.y, data.candidates[0].location.x];
+                                        break;
+                                    }
+                                } catch(e) {}
+                                
+                                if (coords) break;
+                                try {
+                                    const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=1`;
+                                    let res = await fetch(photonUrl);
+                                    let data = await res.json();
+                                    if (data.features && data.features.length > 0) {
+                                        coords = [data.features[0].geometry.coordinates[1], data.features[0].geometry.coordinates[0]];
+                                        break;
+                                    }
+                                } catch(e) {}
+                            }
                         }
 
                         if (coords) geocodeCache[item.location] = coords;
                     } catch (e) {
                         console.warn('Geocoding completely failed for', item.location, e);
                     }
-                    await new Promise(r => setTimeout(r, 300)); 
+                    await new Promise(r => setTimeout(r, 200)); 
                 }
 
                 if (coords) {
@@ -1447,8 +1452,8 @@
                         className: 'custom-div-icon',
                         html: `<div style="background-color: ${safeColor}; color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; border: 2px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.4); font-size: 14px;">${i + 1}</div>`,
                         iconSize: [28, 28],
-                        iconAnchor: [14, 28], 
-                        popupAnchor: [0, -28]
+                        iconAnchor: [14, 14], 
+                        popupAnchor: [0, -18]
                     });
                     const marker = L.marker(coords, {icon: numIcon}).bindPopup(`<div style="text-align:center; padding:4px;"><div style="font-weight:900; font-size:14px; color:#333; margin-bottom:4px;">${i + 1}. ${escapeHtml(item.title)}</div><div style="font-size:11px; color:#666;"><i data-lucide="map-pin" style="width:10px;height:10px;display:inline-block;"></i> ${escapeHtml(item.location)}</div></div>`).addTo(leafletMap);
                     marker.on('popupopen', () => { if (typeof lucide !== 'undefined') lucide.createIcons(); });
