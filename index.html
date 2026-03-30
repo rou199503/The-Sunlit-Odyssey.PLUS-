@@ -1360,24 +1360,24 @@
                         const cleanLoc = item.location.replace(/[\(（].*?[\)）]/g, '').trim(); 
                         const firstPart = item.location.split(/[,，\s-]/)[0].trim(); 
 
-                        // 讓帶有國家的組合優先
-                        let queries = [
-                            `${firstPart} ${trip.dest}`,
-                            `${cleanLoc} ${trip.dest}`,
-                            `${item.location} ${trip.dest}`,
-                            firstPart,
-                            cleanLoc,
-                            item.location
-                        ];
-                        queries = [...new Set(queries.filter(q => q))];
+                        // ✨ 修正核心：將查詢分為「純地名」與「加國家」，純地名配合國家鎖定的命中率最高！
+                        let pureQueries = [item.location, cleanLoc, firstPart];
+                        let countryQueries = [`${item.location} ${trip.dest}`, `${cleanLoc} ${trip.dest}`, `${firstPart} ${trip.dest}`];
+                        
+                        // 過濾空字串與去重
+                        pureQueries = [...new Set(pureQueries.filter(q => q))];
+                        countryQueries = [...new Set(countryQueries.filter(q => q))];
+                        
+                        // 如果有選定國家，優先搜純地名；否則把加了國家的也混進去搜
+                        let queriesToTry = trip.dest !== '其他' ? [...pureQueries, ...countryQueries] : [...pureQueries];
 
                         const nomCountry = { '日本': 'jp', '韓國': 'kr', '泰國': 'th', '台灣': 'tw', '美國': 'us' }[trip.dest] || '';
                         const arcgisCountry = { '日本': 'JP', '韓國': 'KR', '泰國': 'TH', '台灣': 'TW', '美國': 'US' }[trip.dest] || '';
 
-                        for (let query of queries) {
+                        for (let query of queriesToTry) {
                             if (coords) break;
 
-                            // 策略 A: ArcGIS
+                            // 策略 A: ArcGIS 企業圖資 (純地名 + sourceCountry 命中率極高)
                             try {
                                 let arcgisUrl = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(query)}&f=json&maxLocations=5`;
                                 if (arcgisCountry) arcgisUrl += `&sourceCountry=${arcgisCountry}`;
@@ -1386,7 +1386,8 @@
                                 let data = await res.json();
                                 if (data.candidates && data.candidates.length > 0) {
                                     for (let c of data.candidates) {
-                                        if (c.score > 30 && isValidCoords(c.location.y, c.location.x)) {
+                                        // 分數大於20，且通過距離檢測 (避免飛去歐洲)
+                                        if (c.score > 20 && isValidCoords(c.location.y, c.location.x)) {
                                             coords = [c.location.y, c.location.x];
                                             break;
                                         }
@@ -1395,7 +1396,7 @@
                             } catch(e) {}
                             if (coords) break;
 
-                            // 策略 B: Nominatim
+                            // 策略 B: Nominatim (OpenStreetMap)
                             try {
                                 await new Promise(r => setTimeout(r, 400));
                                 let nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&accept-language=zh-TW,zh,ja,en`;
