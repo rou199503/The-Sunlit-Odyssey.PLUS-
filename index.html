@@ -1339,6 +1339,16 @@
             let validPoints = []; 
             let failedLocations = []; 
             const safeColor = escapeHtml(trip.color); 
+            
+            // ✨ 地圖絕對力場：計算合法半徑與中心點
+            const biasCoords = destCoords[trip.dest] || destCoords['其他'];
+            const isValidCoords = (lat, lon) => {
+                if (!biasCoords || trip.dest === '其他') return true;
+                const d = getDistanceFromLatLonInKm(lat, lon, biasCoords.lat, biasCoords.lon);
+                // 亞洲國家半徑鎖定在 3000km 內，歐美給到 7000km
+                const maxDist = ['美國', '歐洲'].includes(trip.dest) ? 7000 : 3000;
+                return d <= maxDist;
+            };
 
             for (let i = 0; i < items.length; i++) {
                 const item = items[i];
@@ -1347,67 +1357,77 @@
                 let coords = geocodeCache[item.location];
                 if (!coords) {
                     try {
-                        // ✨ 升級版智慧定位引擎：自動拆解地點字串，增加命中率
-                        // 1. 移除括號內的備註 (例如: 清水寺(總店) -> 清水寺)
                         const cleanLoc = item.location.replace(/[\(（].*?[\)）]/g, '').trim(); 
-                        // 2. 取第一個逗號或空白前的詞 (例如: 東京迪士尼, 千葉 -> 東京迪士尼)
                         const firstPart = item.location.split(/[,，\s-]/)[0].trim(); 
 
+                        // 讓帶有國家的組合優先
                         let queries = [
-                            item.location,
-                            `${item.location} ${trip.dest}`,
-                            cleanLoc,
+                            `${firstPart} ${trip.dest}`,
                             `${cleanLoc} ${trip.dest}`,
+                            `${item.location} ${trip.dest}`,
                             firstPart,
-                            `${firstPart} ${trip.dest}`
+                            cleanLoc,
+                            item.location
                         ];
-                        // 過濾掉空字串與重複的搜尋組合
                         queries = [...new Set(queries.filter(q => q))];
 
-                        // ✨ 加入國家代碼與座標引力，強制把搜尋範圍鎖在目的地國家，防止「跑到歐洲」的災難
                         const nomCountry = { '日本': 'jp', '韓國': 'kr', '泰國': 'th', '台灣': 'tw', '美國': 'us' }[trip.dest] || '';
                         const arcgisCountry = { '日本': 'JP', '韓國': 'KR', '泰國': 'TH', '台灣': 'TW', '美國': 'US' }[trip.dest] || '';
-                        const biasCoords = destCoords[trip.dest] || destCoords['其他'];
 
                         for (let query of queries) {
                             if (coords) break;
 
-                            // 策略 A: ArcGIS 企業級圖資 (需達到一定信心分數)
+                            // 策略 A: ArcGIS
                             try {
-                                let arcgisUrl = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(query)}&f=json&maxLocations=1`;
-                                if (arcgisCountry) arcgisUrl += `&sourceCountry=${arcgisCountry}`; // 強制鎖定國家
+                                let arcgisUrl = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(query)}&f=json&maxLocations=5`;
+                                if (arcgisCountry) arcgisUrl += `&sourceCountry=${arcgisCountry}`;
                                 
                                 let res = await fetch(arcgisUrl);
                                 let data = await res.json();
-                                if (data.candidates && data.candidates.length > 0 && data.candidates[0].score > 40) {
-                                    coords = [data.candidates[0].location.y, data.candidates[0].location.x];
-                                    break;
+                                if (data.candidates && data.candidates.length > 0) {
+                                    for (let c of data.candidates) {
+                                        if (c.score > 30 && isValidCoords(c.location.y, c.location.x)) {
+                                            coords = [c.location.y, c.location.x];
+                                            break;
+                                        }
+                                    }
                                 }
                             } catch(e) {}
+                            if (coords) break;
 
-                            // 策略 B: Nominatim (OpenStreetMap 附帶國家限制)
+                            // 策略 B: Nominatim
                             try {
-                                await new Promise(r => setTimeout(r, 400)); // 遵守 OSM 規範，避免被 Ban
-                                let nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&accept-language=zh-TW,zh,ja,en`;
-                                if (nomCountry) nomUrl += `&countrycodes=${nomCountry}`; // 強制鎖定國家
+                                await new Promise(r => setTimeout(r, 400));
+                                let nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&accept-language=zh-TW,zh,ja,en`;
+                                if (nomCountry) nomUrl += `&countrycodes=${nomCountry}`;
                                 
                                 let res = await fetch(nomUrl);
                                 let data = await res.json();
                                 if (data && data.length > 0) {
-                                    coords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
-                                    break;
+                                    for (let c of data) {
+                                        if (isValidCoords(parseFloat(c.lat), parseFloat(c.lon))) {
+                                            coords = [parseFloat(c.lat), parseFloat(c.lon)];
+                                            break;
+                                        }
+                                    }
                                 }
                             } catch(e) {}
+                            if (coords) break;
                         }
 
-                        // 策略 C: 最終 Photon 備用 (加入座標引力，優先尋找目的地附近的結果)
+                        // 策略 C: 最終 Photon 備用
                         if (!coords) {
                             try {
-                                const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(cleanLoc || item.location)}&limit=1&lat=${biasCoords.lat}&lon=${biasCoords.lon}`;
+                                const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(cleanLoc || item.location)}&limit=5&lat=${biasCoords.lat}&lon=${biasCoords.lon}`;
                                 let res = await fetch(photonUrl);
                                 let data = await res.json();
                                 if (data.features && data.features.length > 0) {
-                                    coords = [data.features[0].geometry.coordinates[1], data.features[0].geometry.coordinates[0]];
+                                    for (let f of data.features) {
+                                        if (isValidCoords(f.geometry.coordinates[1], f.geometry.coordinates[0])) {
+                                            coords = [f.geometry.coordinates[1], f.geometry.coordinates[0]];
+                                            break;
+                                        }
+                                    }
                                 }
                             } catch(e) {}
                         }
