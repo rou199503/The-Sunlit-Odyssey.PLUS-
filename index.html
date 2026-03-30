@@ -1364,7 +1364,10 @@
                         // 過濾掉空字串與重複的搜尋組合
                         queries = [...new Set(queries.filter(q => q))];
 
+                        // ✨ 加入國家代碼與座標引力，強制把搜尋範圍鎖在目的地國家，防止「跑到歐洲」的災難
                         const nomCountry = { '日本': 'jp', '韓國': 'kr', '泰國': 'th', '台灣': 'tw', '美國': 'us' }[trip.dest] || '';
+                        const arcgisCountry = { '日本': 'JP', '韓國': 'KR', '泰國': 'TH', '台灣': 'TW', '美國': 'US' }[trip.dest] || '';
+                        const biasCoords = destCoords[trip.dest] || destCoords['其他'];
 
                         for (let query of queries) {
                             if (coords) break;
@@ -1372,6 +1375,8 @@
                             // 策略 A: ArcGIS 企業級圖資 (需達到一定信心分數)
                             try {
                                 let arcgisUrl = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?singleLine=${encodeURIComponent(query)}&f=json&maxLocations=1`;
+                                if (arcgisCountry) arcgisUrl += `&sourceCountry=${arcgisCountry}`; // 強制鎖定國家
+                                
                                 let res = await fetch(arcgisUrl);
                                 let data = await res.json();
                                 if (data.candidates && data.candidates.length > 0 && data.candidates[0].score > 40) {
@@ -1384,7 +1389,7 @@
                             try {
                                 await new Promise(r => setTimeout(r, 400)); // 遵守 OSM 規範，避免被 Ban
                                 let nomUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&accept-language=zh-TW,zh,ja,en`;
-                                if (nomCountry) nomUrl += `&countrycodes=${nomCountry}`;
+                                if (nomCountry) nomUrl += `&countrycodes=${nomCountry}`; // 強制鎖定國家
                                 
                                 let res = await fetch(nomUrl);
                                 let data = await res.json();
@@ -1395,10 +1400,10 @@
                             } catch(e) {}
                         }
 
-                        // 策略 C: 最終 Photon 備用
+                        // 策略 C: 最終 Photon 備用 (加入座標引力，優先尋找目的地附近的結果)
                         if (!coords) {
                             try {
-                                const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(cleanLoc || item.location)}&limit=1`;
+                                const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(cleanLoc || item.location)}&limit=1&lat=${biasCoords.lat}&lon=${biasCoords.lon}`;
                                 let res = await fetch(photonUrl);
                                 let data = await res.json();
                                 if (data.features && data.features.length > 0) {
